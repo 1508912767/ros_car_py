@@ -1,0 +1,16 @@
+<launch> 
+
+    <!-- move around by logitech -->
+    <node pkg="joy" type="joy_node" name="joy_node" output="screen" />
+    <node pkg="input_js_control" type="logitech" name="logitech" output="screen"/>
+
+    <!-- move around by keyboard -->
+    <!--node pkg="input_js_control" type="logitech" name="logitech" output="screen"/-->
+
+    <!-- move around by joystick -->
+    <!--node pkg="joy" type="joy_node" name="joy_node" output="screen" /-->
+    <!--node pkg="input_js_control" type="logitech" name="logitech" output="screen"/-->
+
+    <node pkg="ros_car_py" type="base.py" name="base_car" output="screen"/>
+
+</launch>

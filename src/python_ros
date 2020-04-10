@@ -1,0 +1,462 @@
+基于ROS和python，通过TCP通信协议，完成键盘无线控制移动机器人
+
+一、所需工具包
+ 1.ROS键盘包：teleop_twist_keyboard 
+ 2.TCP通讯包：socket
+    $ cd ~/catkin_ws/src
+    $ git clone https://github.com/Forrest-Z/teleop_twist_keyboard.git
+    $ catkin_make
+ 3.在ubuntu的ros中建立一个ros_car_py包:
+    $ cd ~/catkin_ws/src
+    $ catkin_create_pkg ros_car_py roscpp rospy std_msgs
+4.新建 base 文件:
+    $ cd catkin_ws/src/base
+    $ mkdir src 
+    $ vim src/base.py
+代码如下(ROS作为TCP服务器):
+	#!/usr/bin/env python
+	# coding=utf-8
+	import rospy
+	from socket import *
+	import time
+	from threading import Thread
+	from std_msgs.msg import String
+	from geometry_msgs.msg import Twist
+
+	msg_list = []
+
+	def callback(cmd_input, Socket):
+	    print("-----服务器已经启动成功，准备接收数据-----")
+	    Socket.settimeout(5)
+	    recvdata = Socket.recv(4096)
+	    t = Twist()
+	    t.angular.z = cmd_input.angular.z
+	    t.linear.x = cmd_input.linear.x
+	    left_speed = t.linear.x - t.angular.z * 0.5 * 0.2
+	    right_speed = t.linear.x + t.angular.z * 0.5 * 0.2
+	    left_speed *= 1000
+	    right_speed *= 1000
+	    left_speed = str(left_speed)
+	    right_speed = str(right_speed)
+	    # msg_list.append(left_speed)
+	    # msg_list.append(right_speed)
+	    print("left_speed=%s" % left_speed)
+	    print("right_speed=%s" % right_speed)
+
+	    if len(recvdata) != 0:
+		print("-----接收到数据-----")
+		print("recvdata:%s" % recvdata)
+		# Socket.send(b"hello beaglebone")
+		# Socket.send(b"左轮速度")
+		Socket.send(left_speed.encode("utf-8"))
+		# Socket.send(b"右轮速度")
+		Socket.send(right_speed.encode("utf-8"))
+		# Socket.send(msg_list)
+	    else:
+		print('-----未接收到客户端数据，可能连接已经断开-----')
+		# Socket.send(b'client off')
+		# 数据中断时进行服务重启程序，先close 再accept等待重新连线
+		# 可以防止出现当client意外终止导致server的中断（Broken pipe错误）
+		print('-----正在重新建立连接-----')
+		Socket.close()
+		Socket, clientInfo = serverSocket.accept()
+
+	    # serverSocket.close()
+
+
+	def main():
+	    rospy.init_node("base")
+
+	    serverSocket = socket(AF_INET, SOCK_STREAM)
+	    serverSocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+	    serverSocket.bind(('', 8899))
+	    serverSocket.listen(5)
+	    print("-----服务器正在启动-----")
+	    Socket, clientInfo = serverSocket.accept()
+
+	    sub = rospy.Subscriber("cmd_vel", Twist, callback, Socket)
+	    rate = rospy.Rate(10)
+	    rospy.spin()
+
+
+	if __name__ == "__main__":
+	    main()
+
+注意事项:
+	ROS中的python是python2,使用python3会出错，所以需要在开头加上#!/usr/bin/env python
+	编写好python程序后，编译成功但是无法运行，报错Couldn't find executable named XXX.py，无法执行
+问题原因:
+	文件没有执行权限
+解决办法:
+	给文件添加执行权限
+	命令：chmod +x base.py
+
+修改CMakeList.txt:
+	cmake_minimum_required(VERSION 2.8.3)
+	project(ros_car_py)
+
+	find_package(catkin REQUIRED COMPONENTS
+	  roscpp
+	  rospy
+	  std_msgs
+	  message_generation
+	)
+
+
+	add_message_files(
+	  FILES
+	  MsgCar.msg
+	)
+
+	generate_messages(
+	  DEPENDENCIES
+	  std_msgs
+	)
+
+	catkin_package(
+	#  INCLUDE_DIRS include
+	#  LIBRARIES ros_car_py
+	  CATKIN_DEPENDS message_runtime
+	#roscpp rospy std_msgs
+	#  DEPENDS system_lib
+	)
+
+
+	include_directories(
+	# include
+	  ${catkin_INCLUDE_DIRS}
+	)
+单独编译ros_car_pkg包:
+        $ catkin_make -DCATKIN_WHITELIST_PACKAGES='ros_car_py'
+
+二、控制原理：
+	当我们按下键盘时，teleop_twist_keyboard 包会发布 /cmd_vel 发布速度主题
+	在 base 节点订阅这个话题，接收速度数据，转换成字符串(TCP只允许发送字符串)，然后发送至客户端
+1.设置beaglebone作为客户端：
+运行代码加载设备树并读串口数据用于控制PWM，进而控制小车运动
+	from socket import *
+	import time
+
+	SLOTS = "/sys/devices/bone_capemgr.9/slots"
+	p1_duty = "/sys/devices/ocp.3/pwm_test_P9_16.16/duty"
+	p2_duty = "/sys/devices/ocp.3/pwm_test_P8_13.15/duty"
+	p1_period = "/sys/devices/ocp.3/pwm_test_P9_16.16/period"
+	p2_period = "/sys/devices/ocp.3/pwm_test_P8_13.15/period"
+	p1_run = "/sys/devices/ocp.3/pwm_test_P9_16.16/run"
+	p2_run = "/sys/devices/ocp.3/pwm_test_P8_13.15/run"
+	p1_export = "/sys/class/gpio/export"
+	p2_export = "/sys/class/gpio/export"
+	p1_direction = "/sys/class/gpio/gpio44/direction"
+	p2_direction = "/sys/class/gpio/gpio45/direction"
+	p1_polarity = "/sys/class/gpio/gpio44/value"
+	p2_polarity = "/sys/class/gpio/gpio45/value"
+	msg_lists = []
+	clientSocket = socket(AF_INET, SOCK_STREAM)
+	clientSocket.connect(("192.168.1.151", 8899))
+
+	try:
+	    with open(SLOTS, "a") as f:
+		f.write("am33xx_pwm")
+
+	    with open(SLOTS, "a") as f:
+		f.write("bone_pwm_P9_22")
+
+	    with open(SLOTS, "a") as f:
+		f.write("bone_pwm_P9_16")
+
+	    with open(p1_export, "a") as f:
+		f.write("44")
+
+	    with open(p2_export, "a") as f:
+		f.write("45")
+
+	    with open(p1_direction, "a") as f:
+		f.write("in")
+
+	    with open(p2_direction, "a") as f:
+		f.write("in")
+	except:
+	    pass
+
+	while True:
+	    clientSocket.send(b"hello ROS")
+	    msg_list1 = clientSocket.recv(1024)
+	    msg_list2 = clientSocket.recv(1024)
+	    if len(msg_list1) or len(msg_list2) > 0:
+		msg_lists.append(msg_list1)
+		msg_lists.append(msg_list2)
+		for msg in msg_lists:
+		    print("recvData:%s" % msg)
+
+		if msg_lists[0] == '500.0' and msg_lists[1] == '500.0':
+		    msg_lists = []
+		    print("succes")
+		    try:
+		        with open(p1_period, "a") as f:
+		            f.write("500000")
+		        with open(p1_duty, "a") as f:
+		            f.write("250000")
+		        with open(p2_period, "a") as f:
+		            f.write("500000")
+		        with open(p2_duty, "a") as f:
+		            f.write("250000")
+		        with open(p1_run, "a") as f:
+		            f.write("1")
+		        with open(p2_run, "a") as f:
+		            f.write("1")
+		        with open(p1_polarity, "a") as f:
+		            f.write("1")
+		        with open(p2_polarity, "a") as f:
+		            f.write("1")
+		    except:
+		        pass
+
+		elif msg_lists[0] == '400.0' and msg_lists[1] == '600.0':
+		    msg_lists = []
+		    try:
+		        with open(p1_period, "a") as f:
+		            f.write("400000")
+		        with open(p1_duty, "a") as f:
+		            f.write("200000")
+		        with open(p2_period, "a") as f:
+		            f.write("600000")
+		        with open(p2_duty, "a") as f:
+		            f.write("300000")
+		        with open(p1_run, "a") as f:
+		            f.write("1")
+		        with open(p2_run, "a") as f:
+		            f.write("1")
+		        with open(p1_polarity, "a") as f:
+		            f.write("1")
+		        with open(p2_polarity, "a") as f:
+		            f.write("1")
+		    except:
+		        pass
+
+		elif msg_lists[0] == '600.0' and msg_lists[1] == '400.0':
+		    msg_lists = []
+		    try:
+		        with open(p1_period, "a") as f:
+		            f.write("600000")
+		        with open(p1_duty, "a") as f:
+		            f.write("300000")
+		        with open(p2_period, "a") as f:
+		            f.write("400000")
+		        with open(p2_duty, "a") as f:
+		            f.write("200000")
+		        with open(p1_run, "a") as f:
+		            f.write("1")
+		        with open(p2_run, "a") as f:
+		            f.write("1")
+		        with open(p1_polarity, "a") as f:
+		            f.write("1")
+		        with open(p2_polarity, "a") as f:
+		            f.write("1")
+		    except:
+		        pass
+
+		elif msg_lists[0] == '-500.0' and msg_lists[1] == '-500.0':
+		    msg_lists = []
+		    try:
+		        with open(p1_period, "a") as f:
+		            f.write("500000")
+		        with open(p1_duty, "a") as f:
+		            f.write("250000")
+		        with open(p2_period, "a") as f:
+		            f.write("500000")
+		        with open(p2_duty, "a") as f:
+		            f.write("250000")
+		        with open(p1_run, "a") as f:
+		            f.write("1")
+		        with open(p2_run, "a") as f:
+		            f.write("1")
+		        with open(p1_polarity, "a") as f:
+		            f.write("0")
+		        with open(p2_polarity, "a") as f:
+		            f.write("0")
+		    except:
+		        pass
+
+		elif msg_lists[0] == '-600.0' and msg_lists[1] == '-400.0':
+		    msg_lists = []
+		    try:
+		        with open(p1_period, "a") as f:
+		            f.write("600000")
+		        with open(p1_duty, "a") as f:
+		            f.write("300000")
+		        with open(p2_period, "a") as f:
+		            f.write("400000")
+		        with open(p2_duty, "a") as f:
+		            f.write("200000")
+		        with open(p1_run, "a") as f:
+		            f.write("1")
+		        with open(p2_run, "a") as f:
+		            f.write("1")
+		        with open(p1_polarity, "a") as f:
+		            f.write("0")
+		        with open(p2_polarity, "a") as f:
+		            f.write("0")
+		    except:
+		        pass
+
+		elif msg_lists[0] == '-400.0' and msg_lists[1] == '-600.0':
+		    msg_lists = []
+		    try:
+		        with open(p1_period, "a") as f:
+		            f.write("400000")
+		        with open(p1_duty, "a") as f:
+		            f.write("200000")
+		        with open(p2_period, "a") as f:
+		            f.write("600000")
+		        with open(p2_duty, "a") as f:
+		            f.write("300000")
+		        with open(p1_run, "a") as f:
+		            f.write("1")
+		        with open(p2_run, "a") as f:
+		            f.write("1")
+		        with open(p1_polarity, "a") as f:
+		            f.write("0")
+		        with open(p2_polarity, "a") as f:
+		            f.write("0")
+		    except:
+		        pass
+
+		elif msg_lists[0] == '0.0' and msg_lists[1] == '0.0':
+		    msg_lists = []
+		    try:
+		        with open(p1_run, "a") as f:
+		            f.write("0")
+		        with open(p2_run, "a") as f:
+		            f.write("0")
+		    except:
+		        pass
+		else:
+		    pass
+	    else:
+		time.sleep(0.1)
+		clientSocket = socket(AF_INET, SOCK_STREAM)
+		clientSocket.connect(("192.168.1.138", 8899))
+
+
+
+使用手柄控制：
+１安装jstest-gtk,sudo apt-get install jstest-gtk
+２插上手柄ｕｓｂ接口，$jstest /dev/input/js0
+３创建一个ｒｏｓ包cd /src
+	#include<ros/ros.h>
+	#include<geometry_msgs/Twist.h>
+	#include <sensor_msgs/Joy.h>
+	#include<iostream>
+	using namespace std;
+
+	class Teleop
+	{
+	public:
+	    Teleop();
+
+	private:
+	    /* data */
+	    void callback(const sensor_msgs::Joy::ConstPtr& Joy);
+	    ros::NodeHandle n;
+	    ros::Subscriber sub ;
+	    ros::Publisher pub ;
+	    double vlinear,vangular,v1,v2,v3,v4;
+	    int axis_ang_b,axis_lin_b,ton_b,axis_ang_r,axis_lin_r,ton_r;
+	};
+
+	Teleop::Teleop()
+	{
+	    n.param<int>("axis_linear",axis_lin_b,1); //默认axes[1]接收速度
+	    n.param<int>("axis_angular",axis_ang_b,0);//默认axes[0]接收角度
+	    n.param<int>("axis_linear",axis_lin_r,5); //默认axes[5]接收速度
+	    n.param<int>("axis_angular",axis_ang_r,4);//默认axes[4]接收角度
+	    n.param<double>("vel_linear",vlinear,0.5);//默认线速度1 m/s
+	    n.param<double>("vel_angular",vangular,0.5);//默认角速度1 单位rad/s
+	    n.param<int>("button",ton_b,4);                  //使用button4作为油门
+	    n.param<int>("button",ton_r,5);                  //使用button5作为油门
+	    pub = n.advertise<geometry_msgs::Twist>("/cmd_vel",1);
+	    sub = n.subscribe<sensor_msgs::Joy>("joy",10,&Teleop::callback,this);
+	}
+
+	void Teleop::callback(const sensor_msgs::Joy::ConstPtr& Joy)
+	{
+	    geometry_msgs::Twist v;
+	   if(Joy->buttons[ton_b])
+	   {
+		//v.linear.x =(Joy->axes[axis_lin]+Joy->axes[1])*vlinear;
+		//v.angular.z =(Joy->axes[axis_ang]+Joy->axes[0])*vangular;
+		//左手按键
+		v1 =Joy->axes[axis_lin_b]*vlinear;
+		v2 =Joy->axes[axis_ang_b]*vangular;
+	   }
+	   if(Joy->buttons[ton_r])
+	   {
+		//v.linear.x =(Joy->axes[axis_lin]+Joy->axes[1])*vlinear;
+		//v.angular.z =(Joy->axes[axis_ang]+Joy->axes[0])*vangular;
+		//左手摇杆
+		v3 =Joy->axes[axis_lin_r]*vlinear;
+		v4 =Joy->axes[axis_ang_r]*vangular;
+	   }
+	   v.linear.x =v1+v3;
+	   v.angular.z =v2+v4;
+	   ROS_INFO("linear:%.3lf   angular:%.3lf",v.linear.x,v.angular.z);
+	   pub.publish(v);
+
+	}
+
+
+	int main(int argc,char** argv)
+	{
+	    ros::init(argc, argv, "logitech");
+	    Teleop  telelog;
+	    ros::spin();
+	    return 0;
+	}
+
+启动手柄接受信息节点
+rosrun joy joy_node
+roscore
+jstest /dev/input/js0
+rosrun input_js_control logitech
+rosrun ros_car_py base
+ｓｓｈ到板子上，启动
+python 22_tcp_client.py
+
+注意手柄设置的ｍｏｄｅ，记得踩油门
+
+
+# 修改uext文件之后,pwm对应的gpio口会改变,要修改代码
+# 两个驱动器和电机,必须要插入5V的电源
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
